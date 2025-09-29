@@ -90,81 +90,104 @@ class PID:
 
 
 # --- Main ---
-cap = cv2.VideoCapture('data/lanes/input.mp4')
-fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-out = None
-pid = PID()
+# --- Main (robust I/O) ---
+from pathlib import Path
+import os
 
+ROOT = Path(__file__).resolve().parents[1]
+IN_PATH  = ROOT / "data" / "lanes" / "input.mp4"   # change if needed
+OUT_BASENAME = ROOT / "out" / "lanes_annotated.mp4"
+OUT_BASENAME.parent.mkdir(parents=True, exist_ok=True)
+
+print("CWD      :", Path.cwd())
+print("Input    :", IN_PATH)
+print("Output   :", OUT_BASENAME)
+
+cap = cv2.VideoCapture(str(IN_PATH))
+if not cap.isOpened():
+    raise FileNotFoundError(f"Could not open input video: {IN_PATH}")
+
+fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+w   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+h   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+if w == 0 or h == 0:
+    cap.release()
+    raise RuntimeError("Input reports 0 width/height. Try another file or re-encode.")
+
+def open_writer(base_path, fps, size):
+    for fourcc_str, ext in [("mp4v", ".mp4"), ("XVID", ".avi")]:
+        out_path = Path(base_path).with_suffix(ext)
+        vw = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*fourcc_str), fps, size)
+        if vw.isOpened():
+            print(f"Opened writer with {fourcc_str} -> {out_path.name}")
+            return vw, out_path
+        vw.release()
+    raise RuntimeError("Failed to open VideoWriter with mp4v or XVID.")
+
+out, OUT_PATH = open_writer(OUT_BASENAME, fps, (w, h))
+
+pid = PID()
+frame_count = 0
 
 while True:
     ok, frame = cap.read()
     if not ok:
         break
-    h,w = frame.shape[:2]
-    if out is None:
-        out = cv2.VideoWriter('out/lanes_annotated.mp4', fourcc, 30.0, (w,h))
 
+    h, w = frame.shape[:2]
 
     mask = hls_threshold(frame)
     blur = cv2.GaussianBlur(mask,(5,5),0)
     edges = cv2.Canny(blur, 50, 150)
 
-
-    roi_pts = [(int(w*0.1), int(h*0.95)), (int(w*0.43), int(h*0.62)), (int(w*0.57), int(h*0.62)), (int(w*0.9), int(h*0.95))]
+    roi_pts = [(int(w*0.1), int(h*0.95)), (int(w*0.43), int(h*0.62)),
+               (int(w*0.57), int(h*0.62)), (int(w*0.9), int(h*0.95))]
     roi = region_of_interest(edges, roi_pts)
-
 
     M, Minv, src = perspective_matrices(w,h)
     warped = cv2.warpPerspective(roi, M, (w,h), flags=cv2.INTER_LINEAR)
 
-
     leftx,lefty,rightx,righty = sliding_window(warped)
     left_fit,right_fit,ploty = fit_polynomial(warped,leftx,lefty,rightx,righty)
 
-
     lane_area = np.zeros((h,w), dtype=np.uint8)
     if left_fit is not None and right_fit is not None:
-        left_fitx = left_fit[0]*ploty**2 + left_fit[1]*ploty + left_fit[2]
-        right_fitx= right_fit[0]*ploty**2 + right_fit[1]*ploty + right_fit[2]
-        pts_left = np.array([np.transpose(np.vstack([left_fitx, ploty]))])
-        pts_right= np.array([np.flipud(np.transpose(np.vstack([right_fitx, ploty])) )])
-        pts = np.hstack((pts_left, pts_right)).astype(np.int32)
+        left_fitx  = left_fit[0]*ploty**2 + left_fit[1]*ploty + left_fit[2]
+        right_fitx = right_fit[0]*ploty**2 + right_fit[1]*ploty + right_fit[2]
+        pts_left   = np.array([np.transpose(np.vstack([left_fitx, ploty]))])
+        pts_right  = np.array([np.flipud(np.transpose(np.vstack([right_fitx, ploty])) )])
+        pts        = np.hstack((pts_left, pts_right)).astype(np.int32)
         cv2.fillPoly(lane_area, pts, 255)
 
-
-        # Compute center offset
         y_eval = h-1
-        left_x = left_fit[0]*y_eval**2 + left_fit[1]*y_eval + left_fit[2]
-        right_x = right_fit[0]*y_eval**2 + right_fit[1]*y_eval + right_fit[2]
-        lane_center = (left_x + right_x)/2.0
-        veh_center = w/2.0
-        xm_per_pix = 3.7/700 # approx lane width 3.7m
-        offset_m = (veh_center - lane_center) * xm_per_pix
+        left_x   = left_fit[0]*y_eval**2 + left_fit[1]*y_eval + left_fit[2]
+        right_x  = right_fit[0]*y_eval**2 + right_fit[1]*y_eval + right_fit[2]
+        lane_c   = (left_x + right_x)/2.0
+        veh_c    = w/2.0
+        xm_per_pix = 3.7/700
+        offset_m = (veh_c - lane_c) * xm_per_pix
 
-
-        # Steering estimation
-        target_err = (lane_center - veh_center)/ (w/2.0) # -1..1
+        target_err = (lane_c - veh_c) / (w/2.0)
         steer = pid.step(target_err)
 
-
-        # Draw overlay back to original
         color_warp = cv2.warpPerspective(lane_area, Minv, (w,h))
         overlay = frame.copy()
         overlay[color_warp>0] = (0,255,0)
         out_frame = cv2.addWeighted(frame, 1.0, overlay, 0.3, 0)
 
-
-        # HUD text
         cv2.putText(out_frame, f"Offset: {offset_m:+.2f} m", (30,40), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255),2)
         cv2.putText(out_frame, f"Steer: {steer:+.2f}", (30,80), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255),2)
-        # Draw ROI src polygon
         cv2.polylines(out_frame, [np.int32(src)], True, (0,0,255), 2)
     else:
         out_frame = frame
         cv2.putText(out_frame, "Lane lost", (30,40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255),2)
-    out.write(out_frame)
 
+    out.write(out_frame)
+    frame_count += 1
 
 cap.release()
-if out: out.release()
-print("Saved -> out/lanes_annotated.mp4")
+out.release()
+print("Frames written:", frame_count)
+if frame_count == 0:
+    raise RuntimeError("No frames were written — check input path/codec.")
+print("Saved ->", OUT_PATH.resolve())
