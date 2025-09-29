@@ -95,7 +95,7 @@ from pathlib import Path
 import os
 
 ROOT = Path(__file__).resolve().parents[1]
-IN_PATH  = ROOT / "data" / "lanes" / "input.mp4"   # change if needed
+IN_PATH  = ROOT / "data" / "lanes" / "test-video-1.mp4"   # change if needed
 OUT_BASENAME = ROOT / "out" / "lanes_annotated.mp4"
 OUT_BASENAME.parent.mkdir(parents=True, exist_ok=True)
 
