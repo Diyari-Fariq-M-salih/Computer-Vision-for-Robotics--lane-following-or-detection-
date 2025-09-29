@@ -65,4 +65,28 @@ def sliding_window(binary_warped):
     left_lane_inds = np.concatenate(left_lane_inds)
     right_lane_inds= np.concatenate(right_lane_inds)
     leftx = nonzerox[left_lane_inds]; lefty = nonzeroy[left_lane_inds]
+    rightx= nonzerox[right_lane_inds]; righty= nonzeroy[right_lane_inds]
+    return leftx,lefty,rightx,righty
+    
+
+
+def fit_polynomial(binary_warped, leftx,lefty,rightx,righty):
+    left_fit = np.polyfit(lefty, leftx, 2) if len(leftx)>0 else None
+    right_fit= np.polyfit(righty, rightx, 2) if len(rightx)>0 else None
+    ploty = np.linspace(0, binary_warped.shape[0]-1, binary_warped.shape[0])
+    return left_fit, right_fit, ploty
+    
+class PID:
+    def __init__(self,kp=0.12,ki=0.0,kd=0.05,window=30):
+        self.kp,self.ki,self.kd = kp,ki,kd
+        self.errs = deque(maxlen=window)
+        self.prev = None
+    def step(self,err):
+        self.errs.append(err)
+        d = 0 if self.prev is None else err - self.prev
+        self.prev = err
+        i = sum(self.errs)
+        return self.kp*err + self.ki*i + self.kd*d    
+
+
     print("Saved -> out/lanes_annotated.mp4")
