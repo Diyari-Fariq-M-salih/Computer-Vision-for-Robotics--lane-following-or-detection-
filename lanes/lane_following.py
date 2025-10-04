@@ -27,10 +27,9 @@ def preprocess_lane_mask(frame):
     hls = cv2.cvtColor(frame, cv2.COLOR_BGR2HLS)
     H, HL, S = cv2.split(hls)
 
-    # Color masks (tune if needed for your region/weather)
-    #yellow = cv2.inRange(hls, (15,  80, 100), (35, 255, 255)) disable yellow lane detection
-    yellow = np.zeros_like(H, dtype=np.uint8)
-    white  = cv2.inRange(hls, ( 0, 200,   0), (255, 255, 255))
+    # Color masks (white-first; yellow disabled here)
+    yellow = np.zeros_like(H, dtype=np.uint8)  # disable yellow detection
+    white  = cv2.inRange(hls, (0, 200, 0), (255, 255, 255))
 
     # Dark cracks (low lightness)
     cracks = cv2.inRange(HL, 0, 85)
@@ -51,7 +50,8 @@ def preprocess_lane_mask(frame):
     # Cleanup
     mask = cv2.medianBlur(mask, 5)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
-    # --- Shoulder/curb suppression (desaturated bright concrete) ---
+
+    # Shoulder/curb suppression (desaturated bright concrete)
     shoulder = cv2.inRange(HL, 170, 255) & cv2.inRange(S, 0, 60)
     mask = cv2.bitwise_and(mask, cv2.bitwise_not(shoulder))
     return mask
@@ -84,6 +84,7 @@ def perspective_matrices(w, h):
     M = cv2.getPerspectiveTransform(src, dst)
     Minv = cv2.getPerspectiveTransform(dst, src)
     return M, Minv, src
+
 
 def right_lane_fallback(binary, expected_lane_px=700, margin=100):
     """Find a robust right lane when everything else fails."""
@@ -120,10 +121,9 @@ def right_lane_fallback(binary, expected_lane_px=700, margin=100):
     right_fit = np.polyfit(ry, rx, 2)
 
     # Infer left by shifting horizontally by expected lane width (pixels)
-    # Evaluate shift at bottom of image for stability
     y_eval = binary.shape[0] - 1
     right_x_bottom = right_fit[0]*y_eval**2 + right_fit[1]*y_eval + right_fit[2]
-    left_x_bottom = right_x_bottom - expected_lane_px
+    left_x_bottom  = right_x_bottom - expected_lane_px
 
     # Build left by copying curvature terms and shifting intercept
     left_fit = np.array([right_fit[0], right_fit[1], right_fit[2] - expected_lane_px])
@@ -146,7 +146,7 @@ def sliding_window(binary, nwindows=9, margin=120, minpix=20):
     right_search = histogram[midpoint:int(w*0.85)]
 
     leftx_base  = int(np.argmax(left_search) + int(w*0.15))
-    rightx_base = int(np.argmax(right_search) + midpoint) + midpoint
+    rightx_base = int(np.argmax(right_search) + midpoint)  # <-- fixed (no extra +midpoint)
 
     window_height = binary.shape[0] // nwindows
     nonzero = binary.nonzero()
@@ -177,7 +177,6 @@ def sliding_window(binary, nwindows=9, margin=120, minpix=20):
         # Tolerate dashed gaps: only shift if enough points found
         if len(good_left_inds) > minpix:
             leftx_current = int(np.mean(nonzerox[good_left_inds]))
-        # else: keep previous x (coast)
         if len(good_right_inds) > minpix:
             rightx_current = int(np.mean(nonzerox[good_right_inds]))
 
@@ -190,9 +189,7 @@ def sliding_window(binary, nwindows=9, margin=120, minpix=20):
 
 
 def search_around_poly(binary, left_fit, right_fit, margin=60):
-    """
-    Fast search around previous polynomials (good for dashed lines).
-    """
+    """Fast search around previous polynomials (good for dashed lines)."""
     nz = binary.nonzero()
     nonzeroy, nonzerox = np.array(nz[0]), np.array(nz[1])
 
@@ -201,15 +198,13 @@ def search_around_poly(binary, left_fit, right_fit, margin=60):
     right_region = ((nonzerox > (right_fit[0]*(nonzeroy**2) + right_fit[1]*nonzeroy + right_fit[2] - margin)) &
                     (nonzerox < (right_fit[0]*(nonzeroy**2) + right_fit[1]*nonzeroy + right_fit[2] + margin)))
 
-    lx, ly = nonzerox[left_region], nonzeroy[left_region]
+    lx, ly = nonzerox[left_region],  nonzeroy[left_region]
     rx, ry = nonzerox[right_region], nonzeroy[right_region]
     return lx, ly, rx, ry
 
 
 def fit_polynomial(binary, leftx, lefty, rightx, righty):
-    """
-    Quadratic fits for left/right lanes.
-    """
+    """Quadratic fits for left/right lanes."""
     if len(leftx) < 200 or len(rightx) < 200:
         return None, None, None
     left_fit = np.polyfit(lefty, leftx, 2)
@@ -236,6 +231,7 @@ class FitSmoother:
             self.right = self.a*rf + (1-self.a)*self.right
         return self.left, self.right
 
+
 class LaneRegulator:
     """
     Keeps lane width and center stable with EMA smoothing and applies
@@ -254,7 +250,6 @@ class LaneRegulator:
         rx = right_fit[0]*y*y + right_fit[1]*y + right_fit[2]
         width = rx - lx
         center = 0.5*(lx + rx)
-        # Update EMAs (width always; center once initialized)
         self.w_px = self.aw*width + (1 - self.aw)*self.w_px
         if self.c_px is None:
             self.c_px = center
@@ -268,30 +263,22 @@ class LaneRegulator:
         Curvature/linear terms stay the same → polygon remains stable.
         """
         y = h - 1
-        # Desired positions at bottom
         lx_d = self.c_px - self.w_px/2
         rx_d = self.c_px + self.w_px/2
-        # Current positions
         lx = left_fit[0]*y*y + left_fit[1]*y + left_fit[2]
         rx = right_fit[0]*y*y + right_fit[1]*y + right_fit[2]
-        # Adjust only the intercept (c term)
         lf = left_fit.copy();  rf = right_fit.copy()
         lf[2] += (lx_d - lx)
         rf[2] += (rx_d - rx)
         return lf, rf
 
     def synthesize_missing(self, have_left, have_right, h):
-        """
-        If only one side exists, synthesize the other from width & center.
-        Returns (left_fit, right_fit) with the missing side created.
-        """
+        """If only one side exists, synthesize the other from width & center."""
         y = h - 1
         if have_left is not None and have_right is None:
             lx = have_left[0]*y*y + have_left[1]*y + have_left[2]
-            # infer center to be current left + w/2
             c = lx + self.w_px/2 if self.c_px is None else self.c_px
             rx_bottom = c + self.w_px/2
-            # copy curvature/linear; shift intercept so bottom matches
             rf = have_left.copy()
             rf[2] += (rx_bottom - lx)
             return have_left, rf
@@ -320,9 +307,7 @@ class PID:
 
 
 def open_writer(base_path, fps, size):
-    """
-    Try mp4v (mp4), then XVID (avi). Returns (writer, out_path).
-    """
+    """Try mp4v (mp4), then XVID (avi). Returns (writer, out_path)."""
     base = Path(base_path)
     for fourcc_str, ext in [("mp4v", ".mp4"), ("XVID", ".avi")]:
         out_path = base.with_suffix(ext)
@@ -388,6 +373,7 @@ def process_video(input_path: Path, output_path: Path, show: bool=False):
         roi = region_of_interest(mask, roi_pts)
         # Nuke extreme-left band (curb region)
         roi[:, :int(w*0.12)] = 0
+
         # Perspective (bird's-eye)
         M, Minv, src = perspective_matrices(w, h)
         warped = cv2.warpPerspective(roi, M, (w, h), flags=cv2.INTER_LINEAR)
@@ -446,16 +432,32 @@ def process_video(input_path: Path, output_path: Path, show: bool=False):
         # Render overlay
         out_frame = frame.copy()
         if left_fit is not None and right_fit is not None:
-            left_fitx  = left_fit[0]*ploty**2 + left_fit[1]*ploty + left_fit[2]
-            right_fitx = right_fit[0]*ploty**2 + right_fit[1]*ploty + right_fit[2]
-
+            # --- build a clean rectangular lane area in warped space ---
             lane_area = np.zeros((h, w), dtype=np.uint8)
-            pts_left  = np.array([np.transpose(np.vstack([left_fitx, ploty]))])
-            pts_right = np.array([np.flipud(np.transpose(np.vstack([right_fitx, ploty])))])
-            pts = np.hstack((pts_left, pts_right)).astype(np.int32)
-            cv2.fillPoly(lane_area, pts, 255)
 
-            # After you build lane_area (binary), clip it inside a trapezoid
+            # vertical span of the rectangle in warped view
+            y_top    = int(h * 0.62)   # top edge (farther ahead)
+            y_bottom = int(h * 0.95)   # bottom edge (near the car)
+
+            def eval_x(fit, y): 
+                return fit[0]*y*y + fit[1]*y + fit[2]
+
+            x_lb = eval_x(left_fit,  y_bottom)
+            x_rb = eval_x(right_fit, y_bottom)
+            x_lt = eval_x(left_fit,  y_top)
+            x_rt = eval_x(right_fit, y_top)
+
+            def clamp(x): return int(np.clip(x, 0, w-1))
+            rect = np.array([
+                [clamp(x_lb), y_bottom],
+                [clamp(x_lt), y_top],
+                [clamp(x_rt), y_top],
+                [clamp(x_rb), y_bottom]
+            ], dtype=np.int32)
+
+            cv2.fillPoly(lane_area, [rect], 255)
+
+            # Optional: clip the fill to a fixed drive box
             drive_mask = np.zeros_like(lane_area)
             clip_pts = np.array([
                 [int(w*0.30), int(h*0.92)],
@@ -466,15 +468,18 @@ def process_video(input_path: Path, output_path: Path, show: bool=False):
             cv2.fillPoly(drive_mask, [clip_pts], 255)
             lane_area = cv2.bitwise_and(lane_area, drive_mask)
 
-
+            # --- unwarp + overlay ---
             color_warp = cv2.warpPerspective(lane_area, Minv, (w, h))
             overlay = frame.copy()
             overlay[color_warp > 0] = (0, 255, 0)
             out_frame = cv2.addWeighted(frame, 1.0, overlay, 0.30, 0)
 
-            # Offset & simple steer
-            lane_c = (left_fitx[-1] + right_fitx[-1]) / 2.0
-            veh_c = w / 2.0
+            # Offset & simple steer (compute from fits)
+            y_eval = h - 1
+            left_x_bottom  = left_fit[0]*y_eval**2 + left_fit[1]*y_eval + left_fit[2]
+            right_x_bottom = right_fit[0]*y_eval**2 + right_fit[1]*y_eval + right_fit[2]
+            lane_c = (left_x_bottom + right_x_bottom) / 2.0
+            veh_c  = w / 2.0
             offset_m = (veh_c - lane_c) * xm_per_pix
             err = (lane_c - veh_c) / (w/2.0)
             steer = pid.step(err)
@@ -508,7 +513,6 @@ def process_video(input_path: Path, output_path: Path, show: bool=False):
 # -----------------------------
 # CLI
 # -----------------------------
-# change video path and name here on {p.add_argument("--in",  dest="inp",  default="data/lanes/input.mp4",}
 def parse_args():
     p = argparse.ArgumentParser(description="Robust lane following (classical CV)")
     p.add_argument("--in",  dest="inp",  default="data/lanes/test-video-(1).mp4",
