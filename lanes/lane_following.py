@@ -12,8 +12,8 @@ import sys
 
 def preprocess_lane_mask(frame):
     """
-    Build a binary mask highlighting lane paint (white/yellow) and edges
-    on *bright* structures, while suppressing *dark cracks*.
+    Build a binary mask highlighting lane paint (white) + bright edges,
+    while suppressing dark cracks and shoulder/curb concrete.
     """
     # Contrast (CLAHE on L in LAB) + mild gain
     lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
@@ -29,7 +29,7 @@ def preprocess_lane_mask(frame):
 
     # Color masks (white-first; yellow disabled here)
     yellow = np.zeros_like(H, dtype=np.uint8)  # disable yellow detection
-    white  = cv2.inRange(hls, (0, 200, 0), (255, 255, 255))
+    white  = cv2.inRange(hls, (0, 200, 0), (255, 255, 255))  # permissive for bright roads
 
     # Dark cracks (low lightness)
     cracks = cv2.inRange(HL, 0, 85)
@@ -67,7 +67,7 @@ def region_of_interest(binary, pts):
 def perspective_matrices(w, h):
     """
     Symmetric trapezoid -> rectangle transform for a stable bird's-eye view.
-    Adjust the fractions if your camera is different.
+    Adjust fractions if your camera is different.
     """
     src = np.float32([
         [w * 0.44, h * 0.66],
@@ -81,18 +81,18 @@ def perspective_matrices(w, h):
         [w * 0.25, h * 0.98],
         [w * 0.75, h * 0.98]
     ])
-    M = cv2.getPerspectiveTransform(src, dst)
+    M    = cv2.getPerspectiveTransform(src, dst)
     Minv = cv2.getPerspectiveTransform(dst, src)
     return M, Minv, src
 
 
 def right_lane_fallback(binary, expected_lane_px=700, margin=100):
-    """Find a robust right lane when everything else fails."""
+    """Find a robust right lane only, then infer the left by lane width."""
     hist = np.sum(binary[binary.shape[0]//2:, :], axis=0)
     midpoint = hist.shape[0]//2
     right_base = int(np.argmax(hist[midpoint:]) + midpoint)
 
-    # Simple single-side sliding windows
+    # Single-side sliding windows
     nwindows = 9
     window_height = binary.shape[0] // nwindows
     nonzero = binary.nonzero()
@@ -125,7 +125,6 @@ def right_lane_fallback(binary, expected_lane_px=700, margin=100):
     right_x_bottom = right_fit[0]*y_eval**2 + right_fit[1]*y_eval + right_fit[2]
     left_x_bottom  = right_x_bottom - expected_lane_px
 
-    # Build left by copying curvature terms and shifting intercept
     left_fit = np.array([right_fit[0], right_fit[1], right_fit[2] - expected_lane_px])
 
     ploty = np.linspace(0, binary.shape[0]-1, binary.shape[0])
@@ -146,7 +145,7 @@ def sliding_window(binary, nwindows=9, margin=120, minpix=20):
     right_search = histogram[midpoint:int(w*0.85)]
 
     leftx_base  = int(np.argmax(left_search) + int(w*0.15))
-    rightx_base = int(np.argmax(right_search) + midpoint)  # <-- fixed (no extra +midpoint)
+    rightx_base = int(np.argmax(right_search) + midpoint)  # fixed (no extra +midpoint)
 
     window_height = binary.shape[0] // nwindows
     nonzero = binary.nonzero()
@@ -244,7 +243,6 @@ class LaneRegulator:
         self.ac = alpha_c
 
     def update_measures(self, left_fit, right_fit, h):
-        """Measure width and center at the bottom of the image; update EMAs."""
         y = h - 1
         lx = left_fit[0]*y*y + left_fit[1]*y + left_fit[2]
         rx = right_fit[0]*y*y + right_fit[1]*y + right_fit[2]
@@ -257,11 +255,7 @@ class LaneRegulator:
             self.c_px = self.ac*center + (1 - self.ac)*self.c_px
 
     def regularize(self, left_fit, right_fit, h):
-        """
-        Shift intercepts so that at the bottom:
-          left_x = c - w/2, right_x = c + w/2
-        Curvature/linear terms stay the same → polygon remains stable.
-        """
+        """Shift c-terms so bottom positions are centered & at smoothed width."""
         y = h - 1
         lx_d = self.c_px - self.w_px/2
         rx_d = self.c_px + self.w_px/2
@@ -363,7 +357,7 @@ def process_video(input_path: Path, output_path: Path, show: bool=False):
 
         mask = preprocess_lane_mask(frame)
 
-        # Tight ROI (reduces asphalt noise)
+        # Tight ROI (reduces asphalt noise) — slightly shifted right
         roi_pts = [
             (int(w*0.20), int(h*0.96)),
             (int(w*0.48), int(h*0.62)),
@@ -425,19 +419,16 @@ def process_video(input_path: Path, output_path: Path, show: bool=False):
             left_fit, right_fit = smoother.update(left_fit, right_fit)
             last_left_fit, last_right_fit = left_fit, right_fit
 
-        # Ensure ploty exists even when coasting
+        # Ensure ploty exists even when coasting (not strictly needed now)
         if 'ploty' not in locals() or ploty is None:
             ploty = np.linspace(0, h-1, h)
 
-        # Render overlay
+        # -------- Render overlay (rectangle in camera space) --------
         out_frame = frame.copy()
         if left_fit is not None and right_fit is not None:
-            # --- build a clean rectangular lane area in warped space ---
-            lane_area = np.zeros((h, w), dtype=np.uint8)
-
-            # vertical span of the rectangle in warped view
-            y_top    = int(h * 0.62)   # top edge (farther ahead)
-            y_bottom = int(h * 0.95)   # bottom edge (near the car)
+            # Rectangle corners in warped space (top/bottom evaluations)
+            y_top    = int(h * 0.62)
+            y_bottom = int(h * 0.95)
 
             def eval_x(fit, y): 
                 return fit[0]*y*y + fit[1]*y + fit[2]
@@ -447,40 +438,26 @@ def process_video(input_path: Path, output_path: Path, show: bool=False):
             x_lt = eval_x(left_fit,  y_top)
             x_rt = eval_x(right_fit, y_top)
 
-            def clamp(x): return float(np.clip(x, 0, w-1))
+            def clampf(x): return float(np.clip(x, 0, w-1))
             rect_warped = np.array([
-                [clamp(x_lb), float(y_bottom)],
-                [clamp(x_lt), float(y_top)],
-                [clamp(x_rt), float(y_top)],
-                [clamp(x_rb), float(y_bottom)]
+                [clampf(x_lb), float(y_bottom)],
+                [clampf(x_lt), float(y_top)],
+                [clampf(x_rt), float(y_top)],
+                [clampf(x_rb), float(y_bottom)]
             ], dtype=np.float32)
 
-            # --- project the 4 points back to CAMERA space and draw the quad directly ---
-            Minv_f32 = Minv.astype(np.float32)
-            rect_cam = cv2.perspectiveTransform(rect_warped.reshape(1,-1,2), Minv_f32)[0].astype(np.int32)
+            # Project the 4 points back to camera space and draw polygon directly
+            rect_cam = cv2.perspectiveTransform(rect_warped.reshape(1, -1, 2),
+                                                Minv.astype(np.float32))[0].astype(np.int32)
 
             overlay = frame.copy()
-            cv2.fillPoly(overlay, [rect_cam], color=(0, 255, 0))  # crisp, straight edges
+            cv2.fillPoly(overlay, [rect_cam], (0, 255, 0))    # crisp, straight edges
             out_frame = cv2.addWeighted(frame, 1.0, overlay, 0.30, 0)
 
-            # Optional: clip the fill to a fixed drive box
-            drive_mask = np.zeros_like(lane_area)
-            clip_pts = np.array([
-                [int(w*0.30), int(h*0.92)],
-                [int(w*0.48), int(h*0.70)],
-                [int(w*0.52), int(h*0.70)],
-                [int(w*0.70), int(h*0.92)]
-            ], dtype=np.int32)
-            cv2.fillPoly(drive_mask, [clip_pts], 255)
-            lane_area = cv2.bitwise_and(lane_area, drive_mask)
+            # Optional red outline of the same rectangle (not the bow src)
+            cv2.polylines(out_frame, [rect_cam], True, (0, 0, 255), 2)
 
-            # --- unwarp + overlay ---
-            color_warp = cv2.warpPerspective(lane_area, Minv, (w, h))
-            overlay = frame.copy()
-            overlay[color_warp > 0] = (0, 255, 0)
-            out_frame = cv2.addWeighted(frame, 1.0, overlay, 0.30, 0)
-
-            # Offset & simple steer (compute from fits)
+            # Offset & simple steer from polynomial bottoms
             y_eval = h - 1
             left_x_bottom  = left_fit[0]*y_eval**2 + left_fit[1]*y_eval + left_fit[2]
             right_x_bottom = right_fit[0]*y_eval**2 + right_fit[1]*y_eval + right_fit[2]
@@ -495,10 +472,10 @@ def process_video(input_path: Path, output_path: Path, show: bool=False):
                         cv2.FONT_HERSHEY_SIMPLEX, 1.4, (255, 255, 255), 3)
             cv2.putText(out_frame, f"Steer: {steer:+.2f}", (30, 110),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.4, (255, 255, 255), 3)
-            cv2.polylines(out_frame, [np.int32(src)], True, (0, 0, 255), 2)
         else:
             cv2.putText(out_frame, "Lane lost", (30, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0, 0, 255), 4)
+        # ------------------------------------------------------------
 
         writer.write(out_frame)
         frames += 1
