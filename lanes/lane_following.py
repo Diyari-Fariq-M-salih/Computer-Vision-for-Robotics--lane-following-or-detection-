@@ -138,7 +138,7 @@ def right_lane_fallback(binary, expected_lane_px=700, margin=100):
     return left_fit, right_fit, ploty, (left_x_bottom, right_x_bottom)
 
 
-def _window(binary, nwindows=9, margin=160, minpix=12):
+def _window(binary, nwindows=9, margin=160, minpix=8):
     """
     Classic sliding-window lane pixel search.
     Returns left/right pixel coordinates.
@@ -180,11 +180,11 @@ def _window(binary, nwindows=9, margin=160, minpix=12):
 
         # Adaptive widening when a window is empty (helps very long dashes)
         if len(good_left_inds) == 0:
-            win_xleft_low  -= 20
-            win_xleft_high += 20
+            win_xleft_low  -= 30
+            win_xleft_high += 30
         if len(good_right_inds) == 0:
-            win_xright_low  -= 20
-            win_xright_high += 20
+            win_xright_low  -= 30
+            win_xright_high += 30
 
         left_lane_inds.append(good_left_inds)
         right_lane_inds.append(good_right_inds)
@@ -360,7 +360,7 @@ def process_video(input_path: Path, output_path: Path, show: bool=False):
     print(f"Video   : {w}x{h} @ {fps:.2f} fps")
 
     pid = PID()
-    smoother = FitSmoother(alpha=0.25)
+    smoother = FitSmoother(alpha=0.18)
     last_left_fit, last_right_fit = None, None
 
     xm_per_pix = 3.7 / 700.0  # meters per pixel (approx for bottom of image)
