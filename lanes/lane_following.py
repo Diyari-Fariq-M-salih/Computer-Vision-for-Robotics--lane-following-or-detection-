@@ -448,14 +448,19 @@ def process_video(input_path: Path, output_path: Path, show: bool=False):
             x_rt = eval_x(right_fit, y_top)
 
             def clamp(x): return int(np.clip(x, 0, w-1))
-            rect = np.array([
+            rect_warped = np.array([
                 [clamp(x_lb), y_bottom],
                 [clamp(x_lt), y_top],
                 [clamp(x_rt), y_top],
                 [clamp(x_rb), y_bottom]
             ], dtype=np.int32)
 
-            cv2.fillPoly(lane_area, [rect], 255)
+            # --- project the 4 points back to CAMERA space and draw the quad directly ---
+            rect_cam = cv2.perspectiveTransform(rect_warped[None, ...], Minv)[0].astype(np.int32)
+
+            overlay = frame.copy()
+            cv2.fillPoly(overlay, [rect_cam], color=(0, 255, 0))  # crisp, straight edges
+            out_frame = cv2.addWeighted(frame, 1.0, overlay, 0.30, 0)
 
             # Optional: clip the fill to a fixed drive box
             drive_mask = np.zeros_like(lane_area)
