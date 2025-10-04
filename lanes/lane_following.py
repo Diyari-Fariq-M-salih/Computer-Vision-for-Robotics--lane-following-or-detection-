@@ -348,7 +348,7 @@ def process_video(input_path: Path, output_path: Path, show: bool=False):
 # -----------------------------
 # CLI
 # -----------------------------
-
+# change video path and name here on {p.add_argument("--in",  dest="inp",  default="data/lanes/input.mp4",}
 def parse_args():
     p = argparse.ArgumentParser(description="Robust lane following (classical CV)")
     p.add_argument("--in",  dest="inp",  default="data/lanes/input.mp4",
