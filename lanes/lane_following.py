@@ -438,7 +438,7 @@ def process_video(input_path: Path, output_path: Path, show: bool=False):
         if left_fit is not None and right_fit is not None:
             left_fit, right_fit = smoother.update(left_fit, right_fit)
             last_left_fit, last_right_fit = left_fit, right_fit
-            
+
         # Ensure ploty exists even when coasting
         if 'ploty' not in locals() or ploty is None:
             ploty = np.linspace(0, h-1, h)
@@ -454,6 +454,18 @@ def process_video(input_path: Path, output_path: Path, show: bool=False):
             pts_right = np.array([np.flipud(np.transpose(np.vstack([right_fitx, ploty])))])
             pts = np.hstack((pts_left, pts_right)).astype(np.int32)
             cv2.fillPoly(lane_area, pts, 255)
+
+            # After you build lane_area (binary), clip it inside a trapezoid
+            drive_mask = np.zeros_like(lane_area)
+            clip_pts = np.array([
+                [int(w*0.30), int(h*0.92)],
+                [int(w*0.48), int(h*0.70)],
+                [int(w*0.52), int(h*0.70)],
+                [int(w*0.70), int(h*0.92)]
+            ], dtype=np.int32)
+            cv2.fillPoly(drive_mask, [clip_pts], 255)
+            lane_area = cv2.bitwise_and(lane_area, drive_mask)
+
 
             color_warp = cv2.warpPerspective(lane_area, Minv, (w, h))
             overlay = frame.copy()
