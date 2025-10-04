@@ -3,7 +3,8 @@ import cv2, numpy as np, math
 from collections import deque
 
 
-# --- Helpers ---
+# --- Helpers, This function creates a binary mask to isolate the colors typically associated with lane lines (white and yellow) in an image --- 
+
 def hls_threshold(img):
     hls = cv2.cvtColor(img, cv2.COLOR_BGR2HLS)
     H,L,S = cv2.split(hls)
@@ -15,13 +16,13 @@ def hls_threshold(img):
     mask = cv2.bitwise_or(mask, cv2.bitwise_not(white))
     return mask
 
-
+# --- This function applies a mask to the image, keeping only the region defined by the polygon formed from `pts`. ---
 def region_of_interest(img, pts):
     mask = np.zeros_like(img)
     cv2.fillPoly(mask, [np.array(pts, dtype=np.int32)], 255)
     return cv2.bitwise_and(img, mask)
 
-
+# --- This function computes the perspective transformation matrices given the image width and height. ---
 def perspective_matrices(w,h):
     src = np.float32([[w*0.43,h*0.62],[w*0.57,h*0.62],[w*0.10,h*0.95],[w*0.90,h*0.95]])
     dst = np.float32([[w*0.25,0],[w*0.75,0],[w*0.25,h],[w*0.75,h]])
@@ -29,7 +30,7 @@ def perspective_matrices(w,h):
     Minv = cv2.getPerspectiveTransform(dst,src)
     return M, Minv, src
 
-
+# --- This function implements the sliding window technique to detect lane lines in a binary warped image. ---
 def sliding_window(binary_warped):
     histogram = np.sum(binary_warped[binary_warped.shape[0]//2:,:], axis=0)
     out_img = np.dstack((binary_warped,binary_warped,binary_warped))
@@ -69,13 +70,13 @@ def sliding_window(binary_warped):
     return leftx,lefty,rightx,righty
     
 
-
+# --- This function fits a second-degree polynomial to the detected lane line points. ---
 def fit_polynomial(binary_warped, leftx,lefty,rightx,righty):
     left_fit = np.polyfit(lefty, leftx, 2) if len(leftx)>0 else None
     right_fit= np.polyfit(righty, rightx, 2) if len(rightx)>0 else None
     ploty = np.linspace(0, binary_warped.shape[0]-1, binary_warped.shape[0])
     return left_fit, right_fit, ploty
-    
+# --- This class implements a simple PID controller to compute steering adjustments based on the lateral error. ---    
 class PID:
     def __init__(self,kp=0.12,ki=0.0,kd=0.05,window=30):
         self.kp,self.ki,self.kd = kp,ki,kd
@@ -114,6 +115,7 @@ if w == 0 or h == 0:
     cap.release()
     raise RuntimeError("Input reports 0 width/height. Try another file or re-encode.")
 
+# --- Robust VideoWriter that tries multiple codecs ---
 def open_writer(base_path, fps, size):
     for fourcc_str, ext in [("mp4v", ".mp4"), ("XVID", ".avi")]:
         out_path = Path(base_path).with_suffix(ext)
