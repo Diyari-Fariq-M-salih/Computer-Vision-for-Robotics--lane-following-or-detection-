@@ -447,16 +447,17 @@ def process_video(input_path: Path, output_path: Path, show: bool=False):
             x_lt = eval_x(left_fit,  y_top)
             x_rt = eval_x(right_fit, y_top)
 
-            def clamp(x): return int(np.clip(x, 0, w-1))
+            def clamp(x): return float(np.clip(x, 0, w-1))
             rect_warped = np.array([
-                [clamp(x_lb), y_bottom],
-                [clamp(x_lt), y_top],
-                [clamp(x_rt), y_top],
-                [clamp(x_rb), y_bottom]
-            ], dtype=np.int32)
+                [clamp(x_lb), float(y_bottom)],
+                [clamp(x_lt), float(y_top)],
+                [clamp(x_rt), float(y_top)],
+                [clamp(x_rb), float(y_bottom)]
+            ], dtype=np.float32)
 
             # --- project the 4 points back to CAMERA space and draw the quad directly ---
-            rect_cam = cv2.perspectiveTransform(rect_warped[None, ...], Minv)[0].astype(np.int32)
+            Minv_f32 = Minv.astype(np.float32)
+            rect_cam = cv2.perspectiveTransform(rect_warped.reshape(1,-1,2), Minv_f32)[0].astype(np.int32)
 
             overlay = frame.copy()
             cv2.fillPoly(overlay, [rect_cam], color=(0, 255, 0))  # crisp, straight edges
