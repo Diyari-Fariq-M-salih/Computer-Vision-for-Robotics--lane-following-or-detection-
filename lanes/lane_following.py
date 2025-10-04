@@ -525,7 +525,7 @@ def process_video(input_path: Path, output_path: Path, show: bool=False):
 # -----------------------------
 def parse_args():
     p = argparse.ArgumentParser(description="Robust lane following (classical CV)")
-    p.add_argument("--in",  dest="inp",  default="data/lanes/test-video-(1).mp4",
+    p.add_argument("--in",  dest="inp",  default="data/lanes/test-video-(3).mp4",
                    help="Input video path (relative to repo root)")
     p.add_argument("--out", dest="outp", default="out/lanes_annotated.mp4",
                    help="Output video path (relative to repo root, extension may change by codec)")
