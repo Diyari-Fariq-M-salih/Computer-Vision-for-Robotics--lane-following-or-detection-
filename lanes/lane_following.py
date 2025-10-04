@@ -236,6 +236,74 @@ class FitSmoother:
             self.right = self.a*rf + (1-self.a)*self.right
         return self.left, self.right
 
+class LaneRegulator:
+    """
+    Keeps lane width and center stable with EMA smoothing and applies
+    horizontal shifts to fits so the polygon stays centered and rectangular.
+    """
+    def __init__(self, target_px=650, alpha_w=0.25, alpha_c=0.3):
+        self.w_px = target_px     # smoothed lane width (pixels)
+        self.c_px = None          # smoothed center x at bottom
+        self.aw = alpha_w
+        self.ac = alpha_c
+
+    def update_measures(self, left_fit, right_fit, h):
+        """Measure width and center at the bottom of the image; update EMAs."""
+        y = h - 1
+        lx = left_fit[0]*y*y + left_fit[1]*y + left_fit[2]
+        rx = right_fit[0]*y*y + right_fit[1]*y + right_fit[2]
+        width = rx - lx
+        center = 0.5*(lx + rx)
+        # Update EMAs (width always; center once initialized)
+        self.w_px = self.aw*width + (1 - self.aw)*self.w_px
+        if self.c_px is None:
+            self.c_px = center
+        else:
+            self.c_px = self.ac*center + (1 - self.ac)*self.c_px
+
+    def regularize(self, left_fit, right_fit, h):
+        """
+        Shift intercepts so that at the bottom:
+          left_x = c - w/2, right_x = c + w/2
+        Curvature/linear terms stay the same → polygon remains stable.
+        """
+        y = h - 1
+        # Desired positions at bottom
+        lx_d = self.c_px - self.w_px/2
+        rx_d = self.c_px + self.w_px/2
+        # Current positions
+        lx = left_fit[0]*y*y + left_fit[1]*y + left_fit[2]
+        rx = right_fit[0]*y*y + right_fit[1]*y + right_fit[2]
+        # Adjust only the intercept (c term)
+        lf = left_fit.copy();  rf = right_fit.copy()
+        lf[2] += (lx_d - lx)
+        rf[2] += (rx_d - rx)
+        return lf, rf
+
+    def synthesize_missing(self, have_left, have_right, h):
+        """
+        If only one side exists, synthesize the other from width & center.
+        Returns (left_fit, right_fit) with the missing side created.
+        """
+        y = h - 1
+        if have_left is not None and have_right is None:
+            lx = have_left[0]*y*y + have_left[1]*y + have_left[2]
+            # infer center to be current left + w/2
+            c = lx + self.w_px/2 if self.c_px is None else self.c_px
+            rx_bottom = c + self.w_px/2
+            # copy curvature/linear; shift intercept so bottom matches
+            rf = have_left.copy()
+            rf[2] += (rx_bottom - lx)
+            return have_left, rf
+        if have_right is not None and have_left is None:
+            rx = have_right[0]*y*y + have_right[1]*y + have_right[2]
+            c = rx - self.w_px/2 if self.c_px is None else self.c_px
+            lx_bottom = c - self.w_px/2
+            lf = have_right.copy()
+            lf[2] += (lx_bottom - rx)
+            return lf, have_right
+        return have_left, have_right
+
 
 class PID:
     """Simple PID used for a steer-like signal based on lateral error."""
@@ -271,6 +339,7 @@ def open_writer(base_path, fps, size):
 # -----------------------------
 
 def process_video(input_path: Path, output_path: Path, show: bool=False):
+    reg = LaneRegulator(target_px=640, alpha_w=0.25, alpha_c=0.3)
     ROOT = Path(__file__).resolve().parents[1]
     input_path = (ROOT / input_path).resolve()
     output_path = (ROOT / output_path).resolve()
@@ -340,28 +409,40 @@ def process_video(input_path: Path, output_path: Path, show: bool=False):
             left_x  = left_fit[0]*y_eval**2 + left_fit[1]*y_eval + left_fit[2]
             right_x = right_fit[0]*y_eval**2 + right_fit[1]*y_eval + right_fit[2]
             lane_width = right_x - left_x  # in pixels
-            # Tune thresholds for your camera
-            valid = 500 < lane_width < 900 and abs(left_fit[0] - right_fit[0]) < 1e-4
-        # --- robust right-lane fallback first ---
+            valid = 480 < lane_width < 900 and abs(left_fit[0] - right_fit[0]) < 1.2e-4
+
+        # Fallback: right-lane-only recovery
         if not valid:
-            # Try robust right-lane-only mode
-            left_fit_rb, right_fit_rb, ploty_rb, bottoms = right_lane_fallback(
-                warped, expected_lane_px=700, margin=120
-            )
-            if left_fit_rb is not None:
-                left_fit, right_fit, ploty = left_fit_rb, right_fit_rb, ploty_rb
+            lf_rb, rf_rb, ploty_rb, _ = right_lane_fallback(warped, expected_lane_px=640, margin=120)
+            if lf_rb is not None:
+                left_fit, right_fit, ploty = lf_rb, rf_rb, ploty_rb
                 valid = True
-        # --- smoothing / coasting logic ---   
-        if valid:
+
+        # If only one side present (rare), synthesize the other
+        if left_fit is None and right_fit is not None:
+            left_fit, right_fit = reg.synthesize_missing(None, right_fit, h)
+            valid = right_fit is not None
+        elif right_fit is None and left_fit is not None:
+            left_fit, right_fit = reg.synthesize_missing(left_fit, None, h)
+            valid = left_fit is not None
+
+        # If still invalid, coast on last good fit
+        if not valid:
+            left_fit, right_fit = last_left_fit, last_right_fit
+        else:
+            # Update regulator with measured width/center and regularize fits
+            reg.update_measures(left_fit, right_fit, h)
+            left_fit, right_fit = reg.regularize(left_fit, right_fit, h)
+
+        # Smoothing (after regularization for best visuals)
+        if left_fit is not None and right_fit is not None:
             left_fit, right_fit = smoother.update(left_fit, right_fit)
             last_left_fit, last_right_fit = left_fit, right_fit
-        else:
-            # Coast on last good fit if available
-            left_fit, right_fit = last_left_fit, last_right_fit
-
-        # Ensure ploty exists even when we coast
+            
+        # Ensure ploty exists even when coasting
         if 'ploty' not in locals() or ploty is None:
             ploty = np.linspace(0, h-1, h)
+
         # Render overlay
         out_frame = frame.copy()
         if left_fit is not None and right_fit is not None:
@@ -418,7 +499,7 @@ def process_video(input_path: Path, output_path: Path, show: bool=False):
 # change video path and name here on {p.add_argument("--in",  dest="inp",  default="data/lanes/input.mp4",}
 def parse_args():
     p = argparse.ArgumentParser(description="Robust lane following (classical CV)")
-    p.add_argument("--in",  dest="inp",  default="data/lanes/test-video-(2).mp4",
+    p.add_argument("--in",  dest="inp",  default="data/lanes/test-video-(1).mp4",
                    help="Input video path (relative to repo root)")
     p.add_argument("--out", dest="outp", default="out/lanes_annotated.mp4",
                    help="Output video path (relative to repo root, extension may change by codec)")
