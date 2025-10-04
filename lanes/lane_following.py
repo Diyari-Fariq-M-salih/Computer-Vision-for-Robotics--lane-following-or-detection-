@@ -6,6 +6,13 @@ from pathlib import Path
 import argparse
 import sys
 
+# ========================
+# Box shape controls
+# ========================
+RECT_Y_TOP     = 0.60   # how far forward the box reaches (smaller = longer box)
+RECT_Y_BOTTOM  = 0.95   # how close to the bumper the box starts
+RECT_TOP_SCALE = 0.90   # top width as a fraction of the bottom width (0.80..1.00)
+
 # -----------------------------
 # Utilities & Core Components
 # -----------------------------
@@ -131,7 +138,7 @@ def right_lane_fallback(binary, expected_lane_px=700, margin=100):
     return left_fit, right_fit, ploty, (left_x_bottom, right_x_bottom)
 
 
-def sliding_window(binary, nwindows=9, margin=120, minpix=20):
+def sliding_window(binary, nwindows=9, margin=160, minpix=12):
     """
     Classic sliding-window lane pixel search.
     Returns left/right pixel coordinates.
@@ -170,6 +177,15 @@ def sliding_window(binary, nwindows=9, margin=120, minpix=20):
                           (nonzerox >= win_xleft_low) & (nonzerox < win_xleft_high)).nonzero()[0]
         good_right_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) &
                            (nonzerox >= win_xright_low) & (nonzerox < win_xright_high)).nonzero()[0]
+
+        # Adaptive widening when a window is empty (helps very long dashes)
+        if len(good_left_inds) == 0:
+            win_xleft_low  -= 20
+            win_xleft_high += 20
+        if len(good_right_inds) == 0:
+            win_xright_low  -= 20
+            win_xright_high += 20
+
         left_lane_inds.append(good_left_inds)
         right_lane_inds.append(good_right_inds)
 
@@ -187,7 +203,7 @@ def sliding_window(binary, nwindows=9, margin=120, minpix=20):
     return leftx, lefty, rightx, righty
 
 
-def search_around_poly(binary, left_fit, right_fit, margin=60):
+def search_around_poly(binary, left_fit, right_fit, margin=100):
     """Fast search around previous polynomials (good for dashed lines)."""
     nz = binary.nonzero()
     nonzeroy, nonzerox = np.array(nz[0]), np.array(nz[1])
@@ -374,9 +390,14 @@ def process_video(input_path: Path, output_path: Path, show: bool=False):
 
         # Lane pixel search: track around last fit, else sliding windows
         if last_left_fit is not None and last_right_fit is not None:
-            lx, ly, rx, ry = search_around_poly(warped, last_left_fit, last_right_fit, margin=60)
+            lx, ly, rx, ry = search_around_poly(warped, last_left_fit, last_right_fit, margin=100)
+            # If too few points, try a one-shot wider search
+            if len(lx) + len(rx) < 800:
+                lx2, ly2, rx2, ry2 = search_around_poly(warped, last_left_fit, last_right_fit, margin=150)
+                if len(lx2) + len(rx2) > len(lx) + len(rx):
+                    lx, ly, rx, ry = lx2, ly2, rx2, ry2
             if len(lx) < 800 or len(rx) < 800:
-                lx, ly, rx, ry = sliding_window(warped)  # fallback
+                lx, ly, rx, ry = sliding_window(warped)  # fallback (margin=160, minpix=12)
         else:
             lx, ly, rx, ry = sliding_window(warped)
 
@@ -419,24 +440,30 @@ def process_video(input_path: Path, output_path: Path, show: bool=False):
             left_fit, right_fit = smoother.update(left_fit, right_fit)
             last_left_fit, last_right_fit = left_fit, right_fit
 
-        # Ensure ploty exists even when coasting (not strictly needed now)
-        if 'ploty' not in locals() or ploty is None:
-            ploty = np.linspace(0, h-1, h)
-
         # -------- Render overlay (rectangle in camera space) --------
         out_frame = frame.copy()
         if left_fit is not None and right_fit is not None:
             # Rectangle corners in warped space (top/bottom evaluations)
-            y_top    = int(h * 0.62)
-            y_bottom = int(h * 0.95)
+            y_top    = int(h * RECT_Y_TOP)
+            y_bottom = int(h * RECT_Y_BOTTOM)
 
             def eval_x(fit, y): 
                 return fit[0]*y*y + fit[1]*y + fit[2]
 
+            # bottom & raw top from the polynomials
             x_lb = eval_x(left_fit,  y_bottom)
             x_rb = eval_x(right_fit, y_bottom)
-            x_lt = eval_x(left_fit,  y_top)
-            x_rt = eval_x(right_fit, y_top)
+            x_lt_raw = eval_x(left_fit,  y_top)
+            x_rt_raw = eval_x(right_fit, y_top)
+
+            # compute centers + widths, then enforce a controlled top width
+            center_bottom = 0.5*(x_lb + x_rb)
+            width_bottom  = (x_rb - x_lb)
+            center_top = 0.5*(x_lt_raw + x_rt_raw)
+            width_top  = RECT_TOP_SCALE * width_bottom
+
+            x_lt = center_top - 0.5*width_top
+            x_rt = center_top + 0.5*width_top
 
             def clampf(x): return float(np.clip(x, 0, w-1))
             rect_warped = np.array([
@@ -454,7 +481,7 @@ def process_video(input_path: Path, output_path: Path, show: bool=False):
             cv2.fillPoly(overlay, [rect_cam], (0, 255, 0))    # crisp, straight edges
             out_frame = cv2.addWeighted(frame, 1.0, overlay, 0.30, 0)
 
-            # Optional red outline of the same rectangle (not the bow src)
+            # Optional red outline of the same rectangle
             cv2.polylines(out_frame, [rect_cam], True, (0, 0, 255), 2)
 
             # Offset & simple steer from polynomial bottoms
