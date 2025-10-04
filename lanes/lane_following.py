@@ -28,18 +28,19 @@ def preprocess_lane_mask(frame):
     H, HL, S = cv2.split(hls)
 
     # Color masks (tune if needed for your region/weather)
-    yellow = cv2.inRange(hls, (15,  80, 100), (35, 255, 255))
-    white  = cv2.inRange(hls, ( 0, 200,   0), (255, 255, 255))
+    #yellow = cv2.inRange(hls, (15,  80, 100), (35, 255, 255)) disable yellow lane detection
+    yellow = np.zeros_like(H, dtype=np.uint8)
+    white  = cv2.inRange(hls, ( 0, 210,   0), (255, 255, 255))
 
     # Dark cracks (low lightness)
-    cracks = cv2.inRange(HL, 0, 80)
+    cracks = cv2.inRange(HL, 0, 85)
 
     # Brightness-gated edges (avoid edges on dark asphalt)
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     sobelx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
     sobelx = cv2.convertScaleAbs(sobelx)
     _, sx = cv2.threshold(sobelx, 0, 255, cv2.THRESH_OTSU)
-    bright = cv2.inRange(HL, 160, 255)
+    bright = cv2.inRange(HL, 180, 255)
     sx = cv2.bitwise_and(sx, bright)
 
     # Combine: (color ∪ bright-edges) \ cracks
@@ -81,8 +82,54 @@ def perspective_matrices(w, h):
     Minv = cv2.getPerspectiveTransform(dst, src)
     return M, Minv, src
 
+def right_lane_fallback(binary, expected_lane_px=700, margin=100):
+    """Find a robust right lane when everything else fails."""
+    hist = np.sum(binary[binary.shape[0]//2:, :], axis=0)
+    midpoint = hist.shape[0]//2
+    right_base = int(np.argmax(hist[midpoint:]) + midpoint)
 
-def sliding_window(binary, nwindows=9, margin=80, minpix=30):
+    # Simple single-side sliding windows
+    nwindows = 9
+    window_height = binary.shape[0] // nwindows
+    nonzero = binary.nonzero()
+    nonzeroy = np.array(nonzero[0]); nonzerox = np.array(nonzero[1])
+
+    rx_current = right_base
+    right_inds = []
+
+    for window in range(nwindows):
+        wy_low  = binary.shape[0] - (window + 1) * window_height
+        wy_high = binary.shape[0] - window * window_height
+        wx_low  = rx_current - margin
+        wx_high = rx_current + margin
+
+        good = ((nonzeroy >= wy_low) & (nonzeroy < wy_high) &
+                (nonzerox >= wx_low) & (nonzerox < wx_high)).nonzero()[0]
+        right_inds.append(good)
+        if len(good) > 20:
+            rx_current = int(np.mean(nonzerox[good]))
+
+    right_inds = np.concatenate(right_inds) if len(right_inds) else np.array([], dtype=int)
+    rx, ry = nonzerox[right_inds], nonzeroy[right_inds]
+    if len(rx) < 200:
+        return None, None, None, None
+
+    right_fit = np.polyfit(ry, rx, 2)
+
+    # Infer left by shifting horizontally by expected lane width (pixels)
+    # Evaluate shift at bottom of image for stability
+    y_eval = binary.shape[0] - 1
+    right_x_bottom = right_fit[0]*y_eval**2 + right_fit[1]*y_eval + right_fit[2]
+    left_x_bottom = right_x_bottom - expected_lane_px
+
+    # Build left by copying curvature terms and shifting intercept
+    left_fit = np.array([right_fit[0], right_fit[1], right_fit[2] - expected_lane_px])
+
+    ploty = np.linspace(0, binary.shape[0]-1, binary.shape[0])
+    return left_fit, right_fit, ploty, (left_x_bottom, right_x_bottom)
+
+
+def sliding_window(binary, nwindows=9, margin=120, minpix=20):
     """
     Classic sliding-window lane pixel search.
     Returns left/right pixel coordinates.
@@ -258,8 +305,8 @@ def process_video(input_path: Path, output_path: Path, show: bool=False):
         # Tight ROI (reduces asphalt noise)
         roi_pts = [
             (int(w*0.14), int(h*0.96)),
-            (int(w*0.44), int(h*0.66)),
-            (int(w*0.56), int(h*0.66)),
+            (int(w*0.44), int(h*0.62)),
+            (int(w*0.56), int(h*0.62)),
             (int(w*0.86), int(h*0.96)),
         ]
         roi = region_of_interest(mask, roi_pts)
@@ -271,7 +318,7 @@ def process_video(input_path: Path, output_path: Path, show: bool=False):
         # Lane pixel search: track around last fit, else sliding windows
         if last_left_fit is not None and last_right_fit is not None:
             lx, ly, rx, ry = search_around_poly(warped, last_left_fit, last_right_fit, margin=60)
-            if len(lx) < 800 or len(ry) < 800:
+            if len(lx) < 800 or len(rx) < 800:
                 lx, ly, rx, ry = sliding_window(warped)  # fallback
         else:
             lx, ly, rx, ry = sliding_window(warped)
@@ -287,7 +334,16 @@ def process_video(input_path: Path, output_path: Path, show: bool=False):
             lane_width = right_x - left_x  # in pixels
             # Tune thresholds for your camera
             valid = 500 < lane_width < 900 and abs(left_fit[0] - right_fit[0]) < 1e-4
-
+        # --- robust right-lane fallback first ---
+        if not valid:
+            # Try robust right-lane-only mode
+            left_fit_rb, right_fit_rb, ploty_rb, bottoms = right_lane_fallback(
+                warped, expected_lane_px=700, margin=120
+            )
+            if left_fit_rb is not None:
+                left_fit, right_fit, ploty = left_fit_rb, right_fit_rb, ploty_rb
+                valid = True
+        # --- smoothing / coasting logic ---   
         if valid:
             left_fit, right_fit = smoother.update(left_fit, right_fit)
             last_left_fit, last_right_fit = left_fit, right_fit
@@ -351,7 +407,7 @@ def process_video(input_path: Path, output_path: Path, show: bool=False):
 # change video path and name here on {p.add_argument("--in",  dest="inp",  default="data/lanes/input.mp4",}
 def parse_args():
     p = argparse.ArgumentParser(description="Robust lane following (classical CV)")
-    p.add_argument("--in",  dest="inp",  default="data/lanes/test-video-(1).mp4",
+    p.add_argument("--in",  dest="inp",  default="data/lanes/test-video-(2).mp4",
                    help="Input video path (relative to repo root)")
     p.add_argument("--out", dest="outp", default="out/lanes_annotated.mp4",
                    help="Output video path (relative to repo root, extension may change by codec)")
