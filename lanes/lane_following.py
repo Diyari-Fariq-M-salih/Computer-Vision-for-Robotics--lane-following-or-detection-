@@ -30,7 +30,7 @@ def preprocess_lane_mask(frame):
     # Color masks (tune if needed for your region/weather)
     #yellow = cv2.inRange(hls, (15,  80, 100), (35, 255, 255)) disable yellow lane detection
     yellow = np.zeros_like(H, dtype=np.uint8)
-    white  = cv2.inRange(hls, ( 0, 210,   0), (255, 255, 255))
+    white  = cv2.inRange(hls, ( 0, 200,   0), (255, 255, 255))
 
     # Dark cracks (low lightness)
     cracks = cv2.inRange(HL, 0, 85)
@@ -40,7 +40,7 @@ def preprocess_lane_mask(frame):
     sobelx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
     sobelx = cv2.convertScaleAbs(sobelx)
     _, sx = cv2.threshold(sobelx, 0, 255, cv2.THRESH_OTSU)
-    bright = cv2.inRange(HL, 180, 255)
+    bright = cv2.inRange(HL, 170, 255)
     sx = cv2.bitwise_and(sx, bright)
 
     # Combine: (color ∪ bright-edges) \ cracks
@@ -51,6 +51,9 @@ def preprocess_lane_mask(frame):
     # Cleanup
     mask = cv2.medianBlur(mask, 5)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    # --- Shoulder/curb suppression (desaturated bright concrete) ---
+    shoulder = cv2.inRange(HL, 170, 255) & cv2.inRange(S, 0, 60)
+    mask = cv2.bitwise_and(mask, cv2.bitwise_not(shoulder))
     return mask
 
 
@@ -135,11 +138,15 @@ def sliding_window(binary, nwindows=9, margin=120, minpix=20):
     Returns left/right pixel coordinates.
     """
     histogram = np.sum(binary[binary.shape[0]//2:, :], axis=0)
-    out = np.dstack((binary, binary, binary)) * 0
+    h, w = binary.shape[:2]
 
-    midpoint = histogram.shape[0] // 2
-    leftx_base = int(np.argmax(histogram[:midpoint]))
-    rightx_base = int(np.argmax(histogram[midpoint:]) + midpoint)
+    midpoint = w // 2
+    # Ignore extreme edges to avoid curb
+    left_search  = histogram[int(w*0.15):midpoint]
+    right_search = histogram[midpoint:int(w*0.85)]
+
+    leftx_base  = int(np.argmax(left_search) + int(w*0.15))
+    rightx_base = int(np.argmax(right_search) + midpoint) + midpoint
 
     window_height = binary.shape[0] // nwindows
     nonzero = binary.nonzero()
@@ -304,13 +311,14 @@ def process_video(input_path: Path, output_path: Path, show: bool=False):
 
         # Tight ROI (reduces asphalt noise)
         roi_pts = [
-            (int(w*0.14), int(h*0.96)),
-            (int(w*0.44), int(h*0.62)),
+            (int(w*0.20), int(h*0.96)),
+            (int(w*0.48), int(h*0.62)),
             (int(w*0.56), int(h*0.62)),
             (int(w*0.86), int(h*0.96)),
         ]
         roi = region_of_interest(mask, roi_pts)
-
+        # Nuke extreme-left band (curb region)
+        roi[:, :int(w*0.12)] = 0
         # Perspective (bird's-eye)
         M, Minv, src = perspective_matrices(w, h)
         warped = cv2.warpPerspective(roi, M, (w, h), flags=cv2.INTER_LINEAR)
