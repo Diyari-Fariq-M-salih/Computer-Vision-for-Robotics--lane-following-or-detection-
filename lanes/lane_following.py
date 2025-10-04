@@ -138,7 +138,7 @@ def right_lane_fallback(binary, expected_lane_px=700, margin=100):
     return left_fit, right_fit, ploty, (left_x_bottom, right_x_bottom)
 
 
-def _window(binary, nwindows=9, margin=160, minpix=8):
+def sliding_window(binary, nwindows=9, margin=160, minpix=8):
     """
     Classic sliding-window lane pixel search.
     Returns left/right pixel coordinates.
