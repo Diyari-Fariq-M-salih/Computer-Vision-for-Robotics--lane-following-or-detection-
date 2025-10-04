@@ -351,6 +351,9 @@ def process_video(input_path: Path, output_path: Path, show: bool=False):
             # Coast on last good fit if available
             left_fit, right_fit = last_left_fit, last_right_fit
 
+        # Ensure ploty exists even when we coast
+        if 'ploty' not in locals() or ploty is None:
+            ploty = np.linspace(0, h-1, h)
         # Render overlay
         out_frame = frame.copy()
         if left_fit is not None and right_fit is not None:
