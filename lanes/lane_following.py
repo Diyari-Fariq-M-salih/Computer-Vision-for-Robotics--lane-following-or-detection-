@@ -9,9 +9,9 @@ import sys
 # ========================
 # Box shape controls
 # ========================
-RECT_Y_TOP     = 0.60   # how far forward the box reaches (smaller = longer box)
+RECT_Y_TOP     = 0.40   # how far forward the box reaches (smaller = longer box)
 RECT_Y_BOTTOM  = 0.95   # how close to the bumper the box starts
-RECT_TOP_SCALE = 0.90   # top width as a fraction of the bottom width (0.80..1.00)
+RECT_TOP_SCALE = 0.80   # top width as a fraction of the bottom width (0.80..1.00)
 
 # -----------------------------
 # Utilities & Core Components
@@ -138,7 +138,7 @@ def right_lane_fallback(binary, expected_lane_px=700, margin=100):
     return left_fit, right_fit, ploty, (left_x_bottom, right_x_bottom)
 
 
-def sliding_window(binary, nwindows=9, margin=160, minpix=12):
+def _window(binary, nwindows=9, margin=160, minpix=12):
     """
     Classic sliding-window lane pixel search.
     Returns left/right pixel coordinates.
@@ -203,7 +203,7 @@ def sliding_window(binary, nwindows=9, margin=160, minpix=12):
     return leftx, lefty, rightx, righty
 
 
-def search_around_poly(binary, left_fit, right_fit, margin=100):
+def search_around_poly(binary, left_fit, right_fit, margin=150):
     """Fast search around previous polynomials (good for dashed lines)."""
     nz = binary.nonzero()
     nonzeroy, nonzerox = np.array(nz[0]), np.array(nz[1])
