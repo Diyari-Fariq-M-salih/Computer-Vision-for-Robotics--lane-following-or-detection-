@@ -9,9 +9,9 @@ import sys
 # ========================
 # Box shape controls
 # ========================
-RECT_Y_TOP     = 0.40   # how far forward the box reaches (smaller = longer box)
+RECT_Y_TOP     = 0.10   # how far forward the box reaches (smaller = longer box)
 RECT_Y_BOTTOM  = 0.95   # how close to the bumper the box starts
-RECT_TOP_SCALE = 0.80   # top width as a fraction of the bottom width (0.80..1.00)
+RECT_TOP_SCALE = 1.00   # top width as a fraction of the bottom width (0.80..1.00)
 
 # -----------------------------
 # Utilities & Core Components
@@ -525,7 +525,7 @@ def process_video(input_path: Path, output_path: Path, show: bool=False):
 # -----------------------------
 def parse_args():
     p = argparse.ArgumentParser(description="Robust lane following (classical CV)")
-    p.add_argument("--in",  dest="inp",  default="data/lanes/test-video-(3).mp4",
+    p.add_argument("--in",  dest="inp",  default="data/lanes/test-video-(1).mp4",
                    help="Input video path (relative to repo root)")
     p.add_argument("--out", dest="outp", default="out/lanes_annotated.mp4",
                    help="Output video path (relative to repo root, extension may change by codec)")
